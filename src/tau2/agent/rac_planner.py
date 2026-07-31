@@ -71,6 +71,7 @@ class RACPlannerAgentState(BaseModel):
     messages: list[APICompatibleMessage]
     current_plan_name: str | None = None
     strategy_summary: str | None = None
+    candidates_info: list[dict] = Field(default_factory=list)
     replan_count: int = 0
 
     model_config = {"arbitrary_types_allowed": True}
@@ -142,11 +143,7 @@ class RACPlannerAgent(LLMConfigMixin, HalfDuplexAgent[RACPlannerAgentState]):
         else:
             state.messages.append(message)
 
-        # 2. Generate Pareto-optimal plan if not yet created
-        if state.current_plan_name is None:
-            self._create_initial_plan(state)
-
-        # 3. Formulate LLM prompt with planning context
+        # 2. Formulate LLM prompt (including plan strategy if replanned due to failure)
         messages_to_send = list(state.system_messages)
         if state.strategy_summary:
             messages_to_send.append(
@@ -190,6 +187,7 @@ class RACPlannerAgent(LLMConfigMixin, HalfDuplexAgent[RACPlannerAgentState]):
             payload = {
                 "current_plan_name": state.current_plan_name,
                 "strategy_summary": state.strategy_summary,
+                "candidates_info": state.candidates_info,
                 "replan_count": state.replan_count,
                 "messages": msgs_dump,
                 "updated_at": time.strftime("%H:%M:%S"),
@@ -236,6 +234,16 @@ class RACPlannerAgent(LLMConfigMixin, HalfDuplexAgent[RACPlannerAgentState]):
         if plan_result.selected_candidate:
             state.current_plan_name = plan_result.selected_candidate.name
             state.strategy_summary = plan_result.selected_candidate.strategy_summary
+            state.candidates_info = [
+                {
+                    "name": c.name,
+                    "cost": getattr(c, "cost", 0.0),
+                    "risk": getattr(c, "compensation_risk", 0.0),
+                    "strategy_summary": getattr(c, "strategy_summary", ""),
+                    "selected": (c.name == plan_result.selected_candidate.name),
+                }
+                for c in (plan_result.pareto_front or [])
+            ]
             logger.info(
                 f"[RACPlannerAgent] Selected Pareto plan: {state.current_plan_name} "
                 f"(Cost={plan_result.selected_candidate.cost}, Risk={plan_result.selected_candidate.compensation_risk})"
@@ -278,8 +286,68 @@ class RACPlannerAgent(LLMConfigMixin, HalfDuplexAgent[RACPlannerAgentState]):
         if replan_result.selected_candidate:
             state.current_plan_name = f"Replan #{state.replan_count}: {replan_result.selected_candidate.name}"
             state.strategy_summary = replan_result.selected_candidate.strategy_summary
+            state.candidates_info = [
+                {
+                    "name": c.name,
+                    "cost": getattr(c, "cost", 0.0),
+                    "risk": getattr(c, "compensation_risk", 0.0),
+                    "strategy_summary": getattr(c, "strategy_summary", ""),
+                    "selected": (c.name == replan_result.selected_candidate.name),
+                }
+                for c in (replan_result.pareto_front or [])
+            ]
             logger.info(
                 f"[RACPlannerAgent] Selected new plan candidate for cycle #{state.replan_count}: {state.current_plan_name}"
+            )
+
+    def handle_evaluation_failure(
+        self,
+        failure_reason: str,
+        state: RACPlannerAgentState,
+    ) -> None:
+        """Trigger RAC failure recovery & replanning when Tau2 evaluation fails at the end of a trial (Case 2)."""
+        if state.replan_count >= self.max_replan_cycles:
+            logger.warning(
+                f"[RACPlannerAgent] Max replan cycles limit ({self.max_replan_cycles}) reached. Skipping further evaluation replanning."
+            )
+            return
+
+        state.replan_count += 1
+        logger.warning(
+            f"[RACPlannerAgent] Triggering RAC replanning for Tau2 evaluation failure: '{failure_reason}' (cycle #{state.replan_count}/{self.max_replan_cycles})"
+        )
+
+        tool_schemas = self._get_tool_schemas()
+        user_goals = [
+            m.content for m in state.messages if isinstance(m, UserMessage) and m.content
+        ]
+        goal_text = "\n".join(user_goals) if user_goals else "Assist customer per domain policy"
+
+        replan_result = self.planner.handle_react_failure_and_replan(
+            recovery_manager=self.recovery_manager,
+            failed_action="tau2_evaluation_check",
+            error_message=failure_reason,
+            goals=goal_text,
+            tool_schemas=tool_schemas,
+            num_candidates=self.num_candidates,
+        )
+        self._last_plan_result = replan_result
+
+        if replan_result.selected_candidate:
+            state.current_plan_name = f"Replan #{state.replan_count} (Eval Retry): {replan_result.selected_candidate.name}"
+            state.strategy_summary = replan_result.selected_candidate.strategy_summary
+            state.candidates_info = [
+                {
+                    "name": c.name,
+                    "cost": getattr(c, "cost", 0.0),
+                    "risk": getattr(c, "compensation_risk", 0.0),
+                    "strategy_summary": getattr(c, "strategy_summary", ""),
+                    "selected": (c.name == replan_result.selected_candidate.name),
+                }
+                for c in (replan_result.pareto_front or [])
+            ]
+            logger.info(
+                f"[RACPlannerAgent] Selected new plan candidate for evaluation retry: {state.current_plan_name}"
             )
 
 

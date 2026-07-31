@@ -240,8 +240,9 @@ def build_dashboard_group(
     if is_active_running and live_trace and live_trace.get("messages"):
         active_msgs = live_trace.get("messages", [])
         active_tools = sum(1 for m in active_msgs if m.get("tool_calls"))
+        plan_label = live_trace.get("current_plan_name") or "Direct ReAct Execution"
         table.add_row(
-            f"Active Task ({live_trace.get('current_plan_name', 'RAC Strategy')})",
+            f"Active Task ({plan_label})",
             "[yellow]RUNNING...[/]",
             "0.00",
             str(len(active_msgs)),
@@ -259,6 +260,25 @@ def build_dashboard_group(
             start_offset = len(active_msgs) - len(display_msgs)
 
             t_panels = []
+            c_info = live_trace.get("candidates_info", [])
+            if c_info:
+                p_table = Table(title="RAC Pareto Plan Candidates", box=box.SIMPLE, show_header=True, header_style="bold green")
+                p_table.add_column("Candidate Plan", width=22)
+                p_table.add_column("Cost", justify="right", width=8)
+                p_table.add_column("Risk", justify="right", width=8)
+                p_table.add_column("Status", justify="center", width=12)
+                p_table.add_column("Strategy Summary", width=45)
+                for c in c_info:
+                    sel_str = "[bold green]SELECTED[/]" if c.get("selected") else "[dim]Option[/]"
+                    p_table.add_row(
+                        str(c.get("name", "")),
+                        f"{c.get('cost', 0.0):.2f}",
+                        f"{c.get('risk', 0.0):.2f}",
+                        sel_str,
+                        format_json_snippet(c.get("strategy_summary", ""), max_len=120),
+                    )
+                t_panels.append(p_table)
+
             t_panels.append(f"[yellow]Active Task Step Stream ({live_trace.get('current_plan_name', 'RAC Plan')}) - Updated: {live_trace.get('updated_at', '')}[/yellow]")
             if start_offset > 0:
                 t_panels.append(f"[dim]... ({start_offset} earlier steps hidden in live view. Run with --no-watch to view full transcript) ...[/dim]")
