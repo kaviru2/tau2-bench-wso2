@@ -153,6 +153,18 @@ class RACPlannerAgent(LLMConfigMixin, HalfDuplexAgent[RACPlannerAgentState]):
                 )
             )
 
+        # 3. Pre-Response Verification & Numerical Refinement
+        pre_response_guidance = self.planner.verify_and_refine_pre_response_plan(
+            goals=[], messages=state.messages
+        )
+        if pre_response_guidance:
+            messages_to_send.append(
+                SystemMessage(
+                    role="system",
+                    content=pre_response_guidance,
+                )
+            )
+
         messages_to_send.extend(state.messages)
 
         # 4. Generate LLM action/response
