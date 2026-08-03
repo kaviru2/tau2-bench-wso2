@@ -467,6 +467,12 @@ def run_single_task(
             f"Reward: {simulation.reward_info.reward if simulation.reward_info else 'N/A'}"
         )
 
+        try:
+            from save_run_history import update_run_history_csv
+            update_run_history_csv()
+        except Exception:
+            pass
+
         return simulation
 
 

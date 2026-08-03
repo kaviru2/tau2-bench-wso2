@@ -152,6 +152,7 @@ class RACPlannerAgent(LLMConfigMixin, HalfDuplexAgent[RACPlannerAgentState]):
                     content=f"[RAC Selected Plan Strategy: {state.current_plan_name}]\n{state.strategy_summary}",
                 )
             )
+
         messages_to_send.extend(state.messages)
 
         # 4. Generate LLM action/response
