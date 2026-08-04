@@ -54,7 +54,7 @@ In each turn you can either:
 You cannot do both at the same time.
 
 Always follow the domain policy strictly.
-When provided with a candidate plan strategy, execute tools aligned with the selected plan.
+When answering user queries about upcoming orders, totals, or balances, compute and explicitly state the initial total cost of ALL upcoming reservations/items on the account prior to any cancellations as well as remaining active totals.
 If a tool fails, RAC RecoveryManager will perform backtracking and replanning.
 </instructions>
 
@@ -261,6 +261,8 @@ class RACPlannerAgent(LLMConfigMixin, HalfDuplexAgent[RACPlannerAgentState]):
                 f"[RACPlannerAgent] Selected Pareto plan: {state.current_plan_name} "
                 f"(Cost={plan_result.selected_candidate.cost}, Risk={plan_result.selected_candidate.compensation_risk})"
             )
+
+
 
     def _handle_failure_and_replan(
         self, failed_message: ToolMessage, state: RACPlannerAgentState
