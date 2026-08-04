@@ -390,6 +390,9 @@ def generate(
     if tools_schema and tool_choice is None:
         tool_choice = "auto"
 
+    if "gpt-5.6-sol" in model.lower() and tools_schema and "reasoning_effort" not in kwargs:
+        kwargs["reasoning_effort"] = "none"
+
     # Prepare request data for logging
     formatted_messages = _format_messages_for_logging(litellm_messages)
     request_data = {
@@ -414,8 +417,28 @@ def generate(
             **kwargs,
         )
     except Exception as e:
-        logger.error(e)
-        raise e
+        err_str = str(e)
+        if "reasoning_effort" in kwargs and "does not support 'none'" in err_str:
+            kwargs.pop("reasoning_effort", None)
+            response = completion(
+                model=model,
+                messages=litellm_messages,
+                tools=tools_schema,
+                tool_choice=tool_choice,
+                **kwargs,
+            )
+        elif tools_schema and "set reasoning_effort to 'none'" in err_str and kwargs.get("reasoning_effort") != "none":
+            kwargs["reasoning_effort"] = "none"
+            response = completion(
+                model=model,
+                messages=litellm_messages,
+                tools=tools_schema,
+                tool_choice=tool_choice,
+                **kwargs,
+            )
+        else:
+            logger.error(e)
+            raise e
     generation_time_seconds = time.perf_counter() - start_time
     cost = get_response_cost(response)
     usage = get_response_usage(response)

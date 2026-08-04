@@ -446,10 +446,32 @@ def run_single_task(
                 audio_debug=audio_debug,
             )
 
+        if simulation.reward_info and getattr(simulation.reward_info, "reward", 1.0) < 1.0:
+            if hasattr(orchestrator.agent, "handle_evaluation_failure"):
+                fail_reasons = []
+                if hasattr(simulation.reward_info, "communicate_checks") and simulation.reward_info.communicate_checks:
+                    for cc in simulation.reward_info.communicate_checks:
+                        if not getattr(cc, "met", False):
+                            fail_reasons.append(f"Communicate check failed: info '{getattr(cc, 'info', '')}' not communicated")
+                if hasattr(simulation.reward_info, "db_check") and simulation.reward_info.db_check and not getattr(simulation.reward_info.db_check, "db_match", False):
+                    fail_reasons.append("DB check failed: database state did not match expected ground truth")
+
+                fail_msg = " | ".join(fail_reasons) if fail_reasons else "Simulation reward < 1.0"
+                try:
+                    orchestrator.agent.handle_evaluation_failure(fail_msg, orchestrator.agent.state)
+                except Exception as e:
+                    logger.warning(f"Failed to trigger agent handle_evaluation_failure: {e}")
+
         logger.info(
             f"FINISHED SIMULATION: Domain: {config.domain}, Task: {task.id}, "
             f"Reward: {simulation.reward_info.reward if simulation.reward_info else 'N/A'}"
         )
+
+        try:
+            from save_run_history import update_run_history_csv
+            update_run_history_csv()
+        except Exception:
+            pass
 
         return simulation
 
