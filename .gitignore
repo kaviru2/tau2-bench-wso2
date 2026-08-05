@@ -18,6 +18,12 @@ data/annotations/
 src/experiments/model_serving/vllm_serving/.*
 .ruff_cache
 
+# Ignore test output folders in analysis/ while keeping scripts/prompts tracked
+analysis/*
+!analysis/generate_candidate_plans.py
+!analysis/planning_prompt.txt
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
