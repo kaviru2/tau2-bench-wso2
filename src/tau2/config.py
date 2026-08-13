@@ -14,8 +14,8 @@ DEFAULT_LOG_LEVEL = "ERROR"
 # =============================================================================
 DEFAULT_AGENT_IMPLEMENTATION = "llm_agent"
 DEFAULT_USER_IMPLEMENTATION = "user_simulator"
-DEFAULT_LLM_AGENT = "openai/gpt-5-mini"
-DEFAULT_LLM_USER = "openai/gpt-5-mini"
+DEFAULT_LLM_AGENT = "openai/gpt-5.6-luna"
+DEFAULT_LLM_USER = "openai/gpt-5.6-luna"
 DEFAULT_LLM_TEMPERATURE_AGENT = 0.0
 DEFAULT_LLM_TEMPERATURE_USER = 0.0
 DEFAULT_LLM_ARGS_AGENT = {"temperature": DEFAULT_LLM_TEMPERATURE_AGENT}

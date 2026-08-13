@@ -278,6 +278,12 @@ class BaseOrchestrator(ABC, Generic[BaseAgentT, BaseUserT, TrajectoryItemT]):
         try:
             while not self.done:
                 self.step()
+                if hasattr(self.agent, "review_progress"):
+                    self.agent_state = self.agent.review_progress(
+                        completed_turns=self.step_count,
+                        trajectory=self.get_messages(),
+                        state=self.agent_state,
+                    )
                 self._check_termination()
             result = self._finalize()
             finalized = True

@@ -21,6 +21,7 @@ src/experiments/model_serving/vllm_serving/.*
 # Ignore test output folders in analysis/ while keeping scripts/prompts tracked
 analysis/*
 !analysis/generate_candidate_plans.py
+!analysis/generate_failure_instructions.py
 !analysis/planning_prompt.txt
 
 

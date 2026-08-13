@@ -36,8 +36,8 @@ if __name__ == "__main__":
     config = TextRunConfig(
         domain="mock",
         agent="rac_planner",
-        llm_agent="openai/gpt-5-mini",
-        llm_user="openai/gpt-5-mini",
+        llm_agent="openai/gpt-5.6-luna",
+        llm_user="openai/gpt-5.6-luna",
     )
 
     result = run_single_task(

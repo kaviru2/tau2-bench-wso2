@@ -14,7 +14,7 @@ import httpx
 import litellm
 from litellm import completion, completion_cost
 from litellm.caching.caching import Cache
-from litellm.main import ModelResponse, Usage
+from litellm.main import Usage
 from loguru import logger
 
 from tau2.config import (
@@ -116,7 +116,7 @@ def _parse_ft_model_name(model: str) -> str:
         return model
 
 
-def get_response_cost(response: ModelResponse) -> float:
+def get_response_cost(response: Any) -> float:
     """
     Get the cost of the response from the litellm completion.
     """
@@ -131,13 +131,19 @@ def get_response_cost(response: ModelResponse) -> float:
     return cost
 
 
-def get_response_usage(response: ModelResponse) -> Optional[dict]:
+def get_response_usage(response: Any) -> Optional[dict]:
     usage: Optional[Usage] = response.get("usage")
     if usage is None:
         return None
+    completion_tokens = getattr(
+        usage, "completion_tokens", getattr(usage, "output_tokens", None)
+    )
+    prompt_tokens = getattr(
+        usage, "prompt_tokens", getattr(usage, "input_tokens", None)
+    )
     return {
-        "completion_tokens": usage.completion_tokens,
-        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": completion_tokens or 0,
+        "prompt_tokens": prompt_tokens or 0,
     }
 
 
@@ -206,6 +212,82 @@ def to_litellm_messages(messages: list[Message]) -> list[dict]:
         elif isinstance(message, SystemMessage):
             litellm_messages.append({"role": "system", "content": message.content})
     return litellm_messages
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Convert LiteLLM/OpenAI response objects to JSON-compatible dictionaries."""
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    raise TypeError(f"Cannot convert {type(value).__name__} to a dictionary")
+
+
+def to_responses_input(
+    messages: list[Message],
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """Convert Tau2 history to Responses API instructions and input items."""
+    instructions = "\n\n".join(
+        message.content or ""
+        for message in messages
+        if isinstance(message, SystemMessage)
+    ).strip()
+    response_input: list[dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, SystemMessage):
+            continue
+        if isinstance(message, UserMessage):
+            response_input.append({"role": "user", "content": message.content or ""})
+        elif isinstance(message, AssistantMessage):
+            raw_output = (message.raw_data or {}).get("output")
+            if isinstance(raw_output, list):
+                # Reasoning models require all output items, including reasoning
+                # items, to be returned on the next request.
+                response_input.extend(raw_output)
+            elif message.is_tool_call():
+                response_input.extend(
+                    {
+                        "type": "function_call",
+                        "call_id": tool_call.id,
+                        "name": tool_call.name,
+                        "arguments": json.dumps(tool_call.arguments),
+                    }
+                    for tool_call in message.tool_calls or []
+                )
+            else:
+                response_input.append(
+                    {"role": "assistant", "content": message.content or ""}
+                )
+        elif isinstance(message, ToolMessage):
+            response_input.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": message.id,
+                    "output": message.content or "",
+                }
+            )
+    return instructions or None, response_input
+
+
+def to_responses_tools(tools_schema: list[dict]) -> list[dict]:
+    """Flatten Chat Completions function schemas for the Responses API."""
+    responses_tools = []
+    for tool in tools_schema:
+        function = tool.get("function") if tool.get("type") == "function" else None
+        if function is None:
+            responses_tools.append(tool)
+            continue
+        responses_tools.append(
+            {
+                "type": "function",
+                "name": function["name"],
+                "description": function.get("description", ""),
+                "parameters": function.get("parameters", {}),
+            }
+        )
+    return responses_tools
 
 
 def validate_message(message: Message) -> None:
@@ -385,6 +467,10 @@ def generate(
     ):
         os.environ["VERTEXAI_LOCATION"] = "global"
 
+    api_mode = kwargs.pop("api_mode", "chat_completions")
+    if api_mode not in {"chat_completions", "responses"}:
+        raise ValueError(f"Unknown LLM API mode: {api_mode}")
+
     litellm_messages = to_litellm_messages(messages)
     tools_schema = [tool.openai_schema for tool in tools] if tools else None
     if tools_schema and tool_choice is None:
@@ -397,6 +483,7 @@ def generate(
         "messages": formatted_messages,
         "tools": tools_schema,
         "tool_choice": tool_choice,
+        "api_mode": api_mode,
         "kwargs": {
             k: str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v
             for k, v in kwargs.items()
@@ -406,13 +493,26 @@ def generate(
 
     start_time = time.perf_counter()
     try:
-        response = completion(
-            model=model,
-            messages=litellm_messages,
-            tools=tools_schema,
-            tool_choice=tool_choice,
-            **kwargs,
-        )
+        if api_mode == "responses":
+            instructions, response_input = to_responses_input(messages)
+            reasoning_effort = kwargs.pop("reasoning_effort", None)
+            response = litellm.responses(
+                model=model,
+                input=response_input,
+                instructions=instructions,
+                tools=to_responses_tools(tools_schema) if tools_schema else None,
+                tool_choice=tool_choice,
+                reasoning=({"effort": reasoning_effort} if reasoning_effort else None),
+                **kwargs,
+            )
+        else:
+            response = completion(
+                model=model,
+                messages=litellm_messages,
+                tools=tools_schema,
+                tool_choice=tool_choice,
+                **kwargs,
+            )
     except Exception as e:
         logger.error(e)
         raise e
@@ -420,27 +520,45 @@ def generate(
     cost = get_response_cost(response)
     usage = get_response_usage(response)
 
-    response_choice = response.choices[0]
-    try:
-        finish_reason = response_choice.finish_reason
-        if finish_reason == "length":
-            logger.warning("Output might be incomplete due to token limit!")
-    except Exception as e:
-        logger.error(e)
-        raise e
-    assert response_choice.message.role == "assistant", (
-        "The response should be an assistant message"
-    )
-    content = response_choice.message.content
-    raw_tool_calls = response_choice.message.tool_calls or []
-    tool_calls = [
-        ToolCall(
-            id=tool_call.id,
-            name=tool_call.function.name,
-            arguments=json.loads(tool_call.function.arguments),
+    if api_mode == "responses":
+        raw_response = _as_dict(response)
+        raw_tool_calls = [
+            item
+            for item in raw_response.get("output", [])
+            if item.get("type") == "function_call"
+        ]
+        tool_calls = [
+            ToolCall(
+                id=tool_call.get("call_id") or tool_call.get("id", ""),
+                name=tool_call["name"],
+                arguments=json.loads(tool_call.get("arguments") or "{}"),
+            )
+            for tool_call in raw_tool_calls
+        ]
+        content = None if tool_calls else getattr(response, "output_text", None)
+    else:
+        response_choice = response.choices[0]
+        try:
+            finish_reason = response_choice.finish_reason
+            if finish_reason == "length":
+                logger.warning("Output might be incomplete due to token limit!")
+        except Exception as e:
+            logger.error(e)
+            raise e
+        assert response_choice.message.role == "assistant", (
+            "The response should be an assistant message"
         )
-        for tool_call in raw_tool_calls
-    ]
+        content = response_choice.message.content
+        raw_tool_calls = response_choice.message.tool_calls or []
+        tool_calls = [
+            ToolCall(
+                id=tool_call.id,
+                name=tool_call.function.name,
+                arguments=json.loads(tool_call.function.arguments),
+            )
+            for tool_call in raw_tool_calls
+        ]
+        raw_response = response.to_dict()
     tool_calls = tool_calls or None
 
     message = AssistantMessage(
@@ -449,7 +567,7 @@ def generate(
         tool_calls=tool_calls,
         cost=cost,
         usage=usage,
-        raw_data=response.to_dict(),
+        raw_data=raw_response,
         generation_time_seconds=generation_time_seconds,
     )
 

@@ -45,12 +45,82 @@ app = typer.Typer(
 console = Console()
 
 
+def interactive_select_results_file(start_dir: Path) -> Path:
+    """Interactively navigate directories and select a simulation run results.json."""
+    current_dir = start_dir
+
+    while True:
+        has_results = (current_dir / "results.json").exists()
+        subdirs = [p for p in current_dir.iterdir() if p.is_dir() and not p.name.startswith(".")]
+        subdirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+        if not subdirs:
+            if has_results:
+                return current_dir / "results.json"
+            if (current_dir / "simulations").exists() or list(current_dir.glob("*.json")):
+                return current_dir / "results.json"
+            console.print(f"[bold red]No simulation results found in:[/] {current_dir}")
+            raise typer.Exit(1)
+
+        console.print(f"\n[bold cyan]📁 Select a simulation folder from:[/] [yellow]{current_dir}[/yellow]\n")
+
+        options: list[tuple[str, str, Optional[Path]]] = []
+        if has_results:
+            options.append(("0", f"View results in current folder ({current_dir.name})", None))
+
+        for idx, sdir in enumerate(subdirs, 1):
+            options.append((str(idx), sdir.name, sdir))
+
+        for opt_key, label, path_obj in options:
+            if opt_key == "0":
+                console.print(f"  [[bold green]0[/bold green]] [bold green]{label}[/bold green]")
+            else:
+                mtime_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(path_obj.stat().st_mtime))
+                badge = "[dim cyan](run folder)[/dim cyan]" if (path_obj / "results.json").exists() else "[dim yellow](group folder)[/dim yellow]"
+                console.print(f"  [[bold yellow]{opt_key:>{len(str(len(options)))}}[/bold yellow]] [bold]{label}[/bold] {badge} [dim]— {mtime_str}[/dim]")
+
+        console.print()
+        prompt_parts = []
+        if current_dir != start_dir:
+            prompt_parts.append("'b' for back")
+        prompt_parts.append("'q' to quit")
+        prompt_str = f"Enter number ({', '.join(prompt_parts)}): "
+
+        try:
+            choice = input(prompt_str).strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[yellow]Selection cancelled.[/yellow]")
+            raise typer.Exit(0)
+
+        if choice.lower() == "q":
+            raise typer.Exit(0)
+        if choice.lower() == "b" and current_dir != start_dir:
+            current_dir = current_dir.parent
+            continue
+
+        selected = next((opt for opt in options if opt[0] == choice), None)
+        if selected:
+            _, _, selected_path = selected
+            if selected_path is None:
+                return current_dir / "results.json"
+
+            child_subdirs = [p for p in selected_path.iterdir() if p.is_dir() and not p.name.startswith(".")]
+            if not child_subdirs and (selected_path / "results.json").exists():
+                return selected_path / "results.json"
+
+            current_dir = selected_path
+        else:
+            console.print("[bold red]Invalid choice. Please select a valid number from the list.[/bold red]")
+
+
 def resolve_results_file(path_arg: Optional[Path]) -> Path:
-    """Resolve argument or auto-discover the latest results.json in data/simulations/."""
+    """Resolve argument or interactively select results.json in data/simulations/."""
     if path_arg:
         if path_arg.is_file() and path_arg.name.endswith(".json"):
             return path_arg
         if path_arg.is_dir():
+            if sys.stdin.isatty():
+                return interactive_select_results_file(path_arg)
             candidate = path_arg / "results.json"
             if candidate.exists():
                 return candidate
@@ -59,14 +129,20 @@ def resolve_results_file(path_arg: Optional[Path]) -> Path:
     if not sim_base.exists():
         sim_base = Path("data/simulations")
 
-    if sim_base.exists():
-        candidates = sorted(
-            sim_base.glob("*/results.json"),
-            key=lambda p: p.parent.stat().st_mtime,
-            reverse=True,
-        )
-        if candidates:
-            return candidates[0]
+    if not sim_base.exists():
+        console.print("[bold red]Error:[/] data/simulations/ directory does not exist.")
+        raise typer.Exit(1)
+
+    if sys.stdin.isatty():
+        return interactive_select_results_file(sim_base)
+
+    candidates = sorted(
+        sim_base.rglob("results.json"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if candidates:
+        return candidates[0]
 
     console.print(
         "[bold red]Error:[/] No results.json found in data/simulations/. "
@@ -151,8 +227,8 @@ def build_dashboard_group(
 
     domain = str(domain).upper()
     agent_name = str(getattr(info, "agent", "rac_planner"))
-    agent_llm = str(getattr(info, "llm_agent", "openai/gpt-5-mini"))
-    user_llm = str(getattr(info, "llm_user", "openai/gpt-5-mini"))
+    agent_llm = str(getattr(info, "llm_agent", "openai/gpt-5.6-luna"))
+    user_llm = str(getattr(info, "llm_user", "openai/gpt-5.6-luna"))
     mtime = get_file_mtime_str(results_path)
 
     completed_sims = len(simulations)
@@ -194,10 +270,18 @@ def build_dashboard_group(
     table.add_column("Tool Calls", justify="right", width=12)
 
     live_trace = None
-    trace_path = results_path.parent.parent / "live_trace.json"
-    if not trace_path.exists():
-        trace_path = Path("data/simulations/live_trace.json")
-    if trace_path.exists():
+    possible_trace_paths = [
+        results_path.parent / "live_trace.json",
+        results_path.parent.parent / "live_trace.json",
+        Path("data/simulations/live_trace.json"),
+    ]
+    trace_path = None
+    for p in possible_trace_paths:
+        if p.exists():
+            trace_path = p
+            break
+
+    if trace_path and trace_path.exists():
         try:
             if time.time() - trace_path.stat().st_mtime < 180:
                 with open(trace_path) as f:
